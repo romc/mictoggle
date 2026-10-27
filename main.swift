@@ -56,8 +56,11 @@ func hasInput(_ id: AudioDeviceID) -> Bool {
     return AudioObjectGetPropertyDataSize(id, &a, 0, nil, &size) == noErr && size > 0
 }
 
-func defaultInput() -> AudioDeviceID? {
-    var a = prop(kAudioHardwarePropertyDefaultInputDevice)
+func defaultInput() -> AudioDeviceID? { defaultDevice(kAudioHardwarePropertyDefaultInputDevice) }
+func defaultOutput() -> AudioDeviceID? { defaultDevice(kAudioHardwarePropertyDefaultOutputDevice) }
+
+func defaultDevice(_ sel: AudioObjectPropertySelector) -> AudioDeviceID? {
+    var a = prop(sel)
     var id = AudioDeviceID(0)
     var size = UInt32(MemoryLayout<AudioDeviceID>.size)
     guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &a, 0, nil, &size, &id) == noErr, id != 0 else { return nil }
@@ -112,7 +115,7 @@ func setMute(_ id: AudioDeviceID, _ on: Bool) {
     }
 }
 
-/// Микрофон сейчас кем-то открыт (идёт звонок/запись).
+/// Устройство сейчас кем-то открыто (микрофон — звонок/запись, выход — что-то играет).
 func isInUse(_ id: AudioDeviceID) -> Bool {
     var a = prop(kAudioDevicePropertyDeviceIsRunningSomewhere)
     var v: UInt32 = 0
@@ -216,6 +219,9 @@ final class App: NSObject, NSApplicationDelegate {
 
     var started = false
 
+    var outBusy = false
+    var micBusy = false
+
     func update() {
         let want = wantClaim()
         if want != claimed {
@@ -223,7 +229,23 @@ final class App: NSObject, NSApplicationDelegate {
             if started { announce() }
         }
         started = true
+        // Другой плеер (Яндекс Музыка, голосовое в Telegram), начав играть, забирает кнопку себе и
+        // держит её и после паузы. Забираем назад, когда звук затих и когда начинается звонок.
+        let out = defaultOutput().map(isInUse) ?? false
+        let mic = findMic().map(isInUse) ?? false
+        if claimed && ((outBusy && !out) || (!micBusy && mic)) { reassert() }
+        outBusy = out
+        micBusy = mic
         refresh()
+    }
+
+    /// Переход в «играет» делает нас текущим плеером снова (просто .playing повторно — не делает).
+    func reassert() {
+        MPNowPlayingInfoCenter.default().playbackState = .paused
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard self?.claimed == true else { return }
+            MPNowPlayingInfoCenter.default().playbackState = .playing
+        }
     }
 
     /// Звук и надпись: чем теперь управляет кнопка наушников.
@@ -399,6 +421,7 @@ final class App: NSObject, NSApplicationDelegate {
     @objc func reclaim() {
         if mode == .off { mode = .always }
         claim()
+        reassert()
     }
 
     func refresh() {
